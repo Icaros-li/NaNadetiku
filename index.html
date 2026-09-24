@@ -251,6 +251,16 @@ mark{background:#fff3b0;border-radius:3px;padding:0 1px}
 .aiphase.saved{color:var(--ok)}
 .badge-cache{font-size:10.5px;color:#6b5cc4;background:#efecfb;border:1px solid #ddd6f7;
   border-radius:20px;padding:1px 7px;font-weight:600;vertical-align:middle;margin-left:5px}
+/* 备份 / 恢复控件 */
+.bkchk{display:flex;align-items:flex-start;gap:8px;margin-top:10px;font-size:12.5px;color:var(--sec);
+  line-height:1.6;cursor:pointer}
+.bkchk input{margin:2px 0 0;flex:none;width:16px;height:16px;accent-color:var(--pri)}
+.bktext{width:100%;box-sizing:border-box;margin-top:10px;min-height:74px;max-height:180px;resize:vertical;
+  border:1px solid var(--line);border-radius:10px;padding:9px 10px;font-size:12px;line-height:1.6;
+  font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;background:#fbfcff;color:var(--text)}
+.bktext:focus{outline:none;border-color:var(--pri);background:#fff}
+.bkok{margin-top:10px;background:var(--ok-l);border:1px solid #c9e9d5;color:#1c7a45;border-radius:10px;
+  padding:9px 11px;font-size:12.5px;line-height:1.65;word-break:break-word}
 
 /* ---------- 手机适配 ----------
    原先整份样式表没有任何媒体查询，所有尺寸都按桌面写：
@@ -699,6 +709,81 @@ let notes=LS.get('tk_notes',{});          /* {题K:[{id,t,src,time}]} */
 let aiCache=LS.get('tk_aicache',{});
 const saveCfg=()=>LS.set('tk_ai',aiCfg), saveNotes=()=>LS.set('tk_notes',notes);
 const saveCache=()=>LS.set('tk_aicache',aiCache);
+/* ---------- 数据备份 / 恢复 ----------
+   为什么需要：localStorage 是按「来源」隔离的，而来源包含完整地址。
+   同一个文件放在 file:///D:/…/题库练习.html 和 https://user.github.io/repo/ 下
+   是两个毫不相干的存储空间——换地址（改文件名、传 GitHub Pages、换域名）
+   就读不到旧数据了。导出一份 json 就能把进度、笔记、解析缓存带走。
+   注意：密钥默认不导出（备份文件可能被分享或上传），要换设备再勾选。 */
+const BK_KEYS=['tk_prog','tk_wrong','tk_pos','tk_cnt','tk_notes','tk_aicache','tk_ai'];
+const BK_SAFE=['tk_prog','tk_wrong','tk_pos','tk_cnt','tk_notes','tk_aicache'];   /* 不含密钥 */
+function bkStamp(){
+  const d=new Date(),p=function(n){return (n<10?'0':'')+n;};
+  return d.getFullYear()+p(d.getMonth()+1)+p(d.getDate())+'-'+p(d.getHours())+p(d.getMinutes());
+}
+/* 导出：默认下载文件；浏览器禁止下载时（部分 iOS 环境）退回复制到剪贴板，
+   两条路都给，免得分不清是功能坏了还是环境限制。 */
+function backupExport(withKey){
+  const keys=withKey?BK_KEYS:BK_SAFE, data={__app:'题库练习',__ver:1,__time:new Date().toISOString()};
+  keys.forEach(function(k){
+    const raw=localStorage.getItem(k);
+    if(raw!=null){try{data[k]=JSON.parse(raw);}catch(e){data[k]=raw;}}
+  });
+  /* 导出时顺手把缓存裁剪到上限内，避免备份文件无谓地变大 */
+  if(data.tk_aicache){
+    const ks=Object.keys(data.tk_aicache);
+    if(ks.length>CACHE_MAX){
+      ks.sort(function(a,b){return (data.tk_aicache[a].time||0)-(data.tk_aicache[b].time||0);});
+      for(let i=0;i<ks.length-CACHE_MAX;i++)delete data.tk_aicache[ks[i]];
+    }
+  }
+  const txt=JSON.stringify(data,null,1);
+  const nCache=data.tk_aicache?Object.keys(data.tk_aicache).length:0;
+  const nNotes=data.tk_notes?Object.keys(data.tk_notes).reduce(function(s,k){
+    return s+(Array.isArray(data.tk_notes[k])?data.tk_notes[k].length:0);},0):0;
+  const nWrong=Array.isArray(data.tk_wrong)?data.tk_wrong.length:0;
+  const name='题库练习-备份-'+bkStamp()+(withKey?'-含密钥':'')+'.json';
+  let downloaded=false;
+  try{
+    const blob=new Blob([txt],{type:'application/json'});
+    const url=URL.createObjectURL(blob);
+    const a=document.createElement('a');
+    a.href=url;a.download=name;
+    document.body.appendChild(a);a.click();document.body.removeChild(a);
+    setTimeout(function(){URL.revokeObjectURL(url);},4000);   /* 立刻 revoke 会让部分浏览器下载失败 */
+    downloaded=true;
+  }catch(e){downloaded=false;}
+  AI.bkMsg='已导出 '+nCache+' 条解析、'+nNotes+' 条笔记、'+nWrong+' 道错题'
+    +(withKey?'（含密钥，请勿分享）':'')
+    +(downloaded?'，文件已开始下载':'；本环境不支持直接下载，备份内容已复制到剪贴板，请粘贴到备忘录保存');
+  if(!downloaded)copyText(txt,'备份内容已复制');
+  render(true);
+}
+/* 导入：兼容两种输入——完整备份对象，或只含 tk_* 字段的片段。
+   失败要说清是哪一种失败（不是合法 json / 里面没有可识别的数据）。 */
+function backupImport(text){
+  let d;
+  try{d=JSON.parse(text);}catch(e){return '这不是合法的 JSON：'+e.message;}
+  if(!d||typeof d!=='object'||Array.isArray(d))return '内容不是备份对象（应以 { 开头）。';
+  const pick=BK_KEYS.filter(function(k){return d[k]!==undefined&&d[k]!==null;});
+  if(!pick.length)return '没有找到可导入的数据（未包含 tk_prog / tk_notes / tk_aicache 等字段）。';
+  const bad=[];
+  pick.forEach(function(k){
+    try{localStorage.setItem(k,JSON.stringify(d[k]));}catch(e){bad.push(k);}
+  });
+  if(bad.length)return '部分数据写入失败（存储空间不足？）：'+bad.join('、');
+  /* 内存里的副本也要同步，否则不刷新会看到旧数据 */
+  try{prog=LS.get('tk_prog',prog);}catch(e){}
+  try{wrong=LS.get('tk_wrong',wrong);}catch(e){}
+  try{pos=LS.get('tk_pos',pos);}catch(e){}
+  try{cnt=LS.get('tk_cnt',cnt);}catch(e){}
+  try{notes=LS.get('tk_notes',notes);}catch(e){}
+  try{aiCache=LS.get('tk_aicache',aiCache);}catch(e){}
+  try{aiCfg=LS.get('tk_ai',aiCfg);}catch(e){}
+  const nCache=aiCache?Object.keys(aiCache).length:0;
+  let nNotes=0;for(const k in notes)if(Array.isArray(notes[k]))nNotes+=notes[k].length;
+  return 'ok:'+pick.length+'|'+nCache+'|'+nNotes;
+}
 /* 缓存键：题目 + 版本（模式/强度）。model 也带上，换模型不该复用旧结果 */
 function cacheKey(qk){
   const mode=aiCfg.fast?'fast':'full';
@@ -1267,9 +1352,63 @@ function viewAI(){
     +'切换模式或强度会重新解析。</div>'
     +'<div class="row-btns" style="margin-top:10px">'
     +'<button class="btn ghost sm" data-act="cacheclear">清空缓存</button></div></div></div>';
+  /* 备份 / 恢复：换地址（改名、传 GitHub Pages）会换掉 localStorage 的来源，
+     旧数据读不到，所以提供一个明确的搬运通道。 */
+  let nNotesBk=0;for(const nk in notes)if(Array.isArray(notes[nk]))nNotesBk+=notes[nk].length;
+  h+='<div class="card" style="margin-top:12px"><div class="setrow" style="margin-bottom:6px">'
+    +'<label>备份与恢复</label>'
+    +'<div class="hint">当前：答题进度、<b>'+wrong.length+'</b> 道错题、<b>'+nNotesBk+'</b> 条笔记、'
+    +'<b>'+cks.length+'</b> 条解析缓存。</div>'
+    +'<div class="hint" style="margin-top:6px">数据存在这台设备的浏览器里，'
+    +'<b>换网址、换浏览器、清理缓存都会看不到</b>。导出成文件就能带到任何地方。</div>'
+    +'<div class="row-btns" style="margin-top:10px">'
+    +'<button class="btn pri sm" data-act="bkexport">导出备份</button>'
+    +'<button class="btn ghost sm" data-act="bkimport">导入备份</button></div>'
+    +'<label class="bkchk"><input type="checkbox" id="bkKey">'
+    +'<span>备份里包含 API 密钥（换设备才勾；分享文件前请取消）</span></label>'
+    +'<textarea id="bkText" class="bktext" placeholder="导入：把备份文件里的内容粘贴到这里（也可以直接选择文件）"'
+    +' spellcheck="false"></textarea>'
+    +'<div class="row-btns" style="margin-top:8px">'
+    +'<button class="btn ghost sm" data-act="bkfile">选择备份文件</button>'
+    +'<button class="btn pri sm" data-act="bkdo">确认导入</button></div>'
+    +'<input type="file" id="bkFile" accept=".json,application/json" style="display:none">'
+    +(AI.bkMsg?'<div class="bkok">'+esc(AI.bkMsg)+'</div>':'')
+    +'</div></div>';
   h+='<div class="hint" style="margin-top:12px;font-size:11.5px;color:#9aa4b2;line-height:1.7;padding:0 4px">'
     +'用法：答完一题 → 点「AI 解析本题」；或直接在解析里长按选中一段文字，点「解析选中文字」，结果会作为笔记追加到当前题下方。</div>';
   h+='</div>';
+  /* 文件选择器要在 HTML 插入之后再绑事件：
+     让用户可以直接选 .json 文件，不必手动打开文件复制内容
+     （手机上复制一个几千行的 json 很不现实）。 */
+  setTimeout(function(){
+    const f=document.getElementById('bkFile');
+    if(f&&!f.__bound){
+      f.__bound=true;
+      f.addEventListener('change',function(){
+        const file=f.files&&f.files[0];
+        if(!file)return;
+        const fr=new FileReader();
+        fr.onload=function(){
+          const ta=document.getElementById('bkText');
+          const r=backupImport(String(fr.result||''));
+          if(r.indexOf('ok:')===0){
+            const p=r.slice(3).split('|');
+            toast('导入成功：'+p[1]+' 条解析、'+p[2]+' 条笔记');
+            AI.bkMsg='已从文件「'+file.name+'」导入 '+p[1]+' 条解析、'+p[2]+' 条笔记';
+            render(true);
+          }else{
+            /* 文件读进来了但内容不对：回填到文本框，用户能看见问题出在哪 */
+            if(ta)ta.value=String(fr.result||'').slice(0,200000);
+            toast(r);
+            AI.bkMsg='导入失败：'+r;
+            render(true);
+          }
+        };
+        fr.onerror=function(){toast('读取文件失败，请改用手动粘贴');};
+        fr.readAsText(file);
+      });
+    }
+  },0);
   return h;
 }
 
@@ -1299,6 +1438,21 @@ document.addEventListener('click',function(e){
   else if(a==='cacheclear')ask('确定清空全部 AI 解析缓存吗？\n题本与笔记不受影响，只是下次解析要重新请求。',function(){
     aiCache={};saveCache();toast('缓存已清空');render(true);
   });
+  else if(a==='bkexport'){const c=document.getElementById('bkKey');backupExport(c?!!c.checked:false);}
+  else if(a==='bkimport'){const ta=document.getElementById('bkText');if(ta)ta.focus();toast('请把备份内容粘贴到下方文本框，或点「选择备份文件」');}
+  else if(a==='bkfile'){const f=document.getElementById('bkFile');if(f)f.click();}
+  else if(a==='bkdo'){
+    const ta=document.getElementById('bkText');
+    const v=ta?ta.value.trim():'';
+    if(!v){toast('请先粘贴备份内容，或点「选择备份文件」');return;}
+    const r=backupImport(v);
+    if(r.indexOf('ok:')===0){
+      const p=r.slice(3).split('|');
+      toast('导入成功：'+p[1]+' 条解析、'+p[2]+' 条笔记');
+      AI.bkMsg='已导入 '+p[1]+' 条解析、'+p[2]+' 条笔记，页面已是最新数据';
+      render(true);
+    }else{toast(r);}
+  }
   else if(a==='aisel')selTextNow();
   else if(a==='nadd'){const id=S.list[S.idx];const t=document.getElementById('ntext');const v=t?t.value:'';
     if(addNote(D[id].k,v,'user')){niText[id]='';render(true);toast('已添加笔记');}}
